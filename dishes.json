@@ -1,0 +1,32 @@
+{
+  "dishes": [
+    {
+      "id": "burger",
+      "name": { "en": "Classic Burger", "ar": "برغر كلاسيك" },
+      "model": "models/burger.glb",
+      "size_m": 0.12,
+      "credit": "3D model: \"Burger Realistic (Free)\" by erebus3d, CC BY 4.0",
+      "credit_url": "https://sketchfab.com/3d-models/burger-realistic-free-18e59d7dbd2243c69f469e0f056f44c4",
+      "layers": [
+        { "node": "bun_bottom", "en": "Bottom bun",       "ar": "الخبز السفلي" },
+        { "node": "lettuce",    "en": "Lettuce",          "ar": "خس" },
+        { "node": "patty",      "en": "Beef patty",       "ar": "لحم البرغر" },
+        { "node": "cheese",     "en": "Cheese",           "ar": "جبن" },
+        { "node": "pickles",    "en": "Pickles",          "ar": "خيار مخلل" },
+        { "node": "tomato",     "en": "Tomato",           "ar": "طماطم" },
+        { "node": "bun_top",    "en": "Top bun · sesame", "ar": "الخبز العلوي" }
+      ]
+    },
+    {
+      "id": "sample",
+      "name": { "en": "Layer test", "ar": "اختبار الطبقات" },
+      "model": "models/sample.glb",
+      "size_m": 0.12,
+      "layers": [
+        { "node": "base",   "en": "Base",   "ar": "القاعدة" },
+        { "node": "middle", "en": "Middle", "ar": "الوسط" },
+        { "node": "top",    "en": "Top",    "ar": "الأعلى" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+.claude/
+qr/
+*-raw.glb
+__pycache__/
+scans/
+models/incoming/
