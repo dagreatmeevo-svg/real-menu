@@ -4,3 +4,4 @@ qr/
 __pycache__/
 scans/
 models/incoming/
+tests/

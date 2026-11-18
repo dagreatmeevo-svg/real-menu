@@ -9,8 +9,13 @@
 html,body{margin:0;height:100%;overflow:hidden;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#fff;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
 body{background:radial-gradient(ellipse at 50% 30%,#4a3727 0%,#1b130d 70%)}
 body.ar{background:transparent}
-#cam{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;display:none}
-body.ar #cam{display:none!important}
+#cam,#camImg{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;display:none}
+body.ar #cam,body.ar #camImg{display:none!important}
+#plateChip{position:absolute;left:50%;top:calc(104px + env(safe-area-inset-top));transform:translateX(-50%);padding:6px 12px;font-size:12px;max-width:90%;width:max-content;text-align:center;line-height:1.35}
+#plateChip.ok{border-color:#7ddc6f;color:#c8f5bf}
+#plateChip[hidden]{display:none}
+#aim{position:absolute;left:50%;top:50%;width:34px;height:34px;margin:-17px 0 0 -17px;border:2px solid rgba(255,255,255,.85);border-radius:50%;box-shadow:0 0 0 1px rgba(0,0,0,.35)}
+#aim[hidden]{display:none}
 #gl{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none}
 #ui{position:fixed;inset:0;pointer-events:none}
 .glass{background:rgba(20,16,12,.62);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.14);border-radius:14px}
@@ -39,11 +44,14 @@ button[hidden]{display:none}
 </head>
 <body>
 <video id="cam" playsinline muted autoplay></video>
+<img id="camImg" alt="">
 <canvas id="gl"></canvas>
 
 <div id="ui">
   <div class="top glass"><b id="dishEn">Smart Menu</b><span id="dishAr" dir="rtl">قائمة ذكية</span></div>
   <div id="hint" class="glass">Drag to rotate · pinch to zoom · slide to explode</div>
+  <div id="plateChip" class="glass" hidden></div>
+  <div id="aim" hidden></div>
   <div id="labels"></div>
   <div id="loading" class="glass">Loading dish…</div>
   <div id="toast" class="glass"></div>
@@ -57,7 +65,7 @@ button[hidden]{display:none}
       <button id="btnSpin" class="on">Auto-rotate</button>
       <button id="btnAR" hidden>Place on table (AR)</button>
     </div>
-    <div class="note">Camera mode works on any phone. Real table anchoring works on Android Chrome.</div>
+    <div class="note">Camera: aim at the plate or tap it, the dish sits in its centre. AR table placement: Android Chrome.</div>
     <div class="note credit" id="credit" hidden></div>
   </div>
 </div>
@@ -612,27 +620,312 @@ button[hidden]{display:none}
     catcher.visible = real;
   }
 
+  /* ---------- plate finder (camera mode) ----------
+     Aim the centre of the screen at the plate. The region around the centre that shares the
+     plate's colour is grown, its outline turned into a 4-corner shape, and the camera pose is
+     solved from that shape (plates and pads are flat and roughly known in size). The dish is
+     then drawn at real size in the plate's centre. Works on any phone, no AR support needed. */
+  const camImg = $('camImg'), plateChip = $('plateChip'), aim = $('aim');
+  const PLATE = {
+    rect: 0.25,            // long side of a rectangular plate / tray / mouse pad (m)
+    round: 0.26,           // diameter of a round plate (m)
+    focal: parseFloat(new URLSearchParams(location.search).get('focal')) || 0.75  // f / long side of the camera image (~26 mm phone lens)
+  };
+  const pf = {
+    src: null, sw: 0, sh: 0, timer: null, locked: false, lastSeen: 0, kind: '',
+    camPos: new THREE.Vector3(), camQuat: new THREE.Quaternion(), fov: 45, fresh: false,
+    centre: new THREE.Vector3(), quad: null,
+    seed: [0.5, 0.5]       // where to look for the plate, as a fraction of the camera image
+  };
+  const detCanvas = document.createElement('canvas');
+  const dctx = detCanvas.getContext('2d', { willReadFrequently: true });
+  const DET_LONG = 200;
+
+  function hull(points) {           // monotone chain, points [[x,y],...]
+    points.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    const lo = [], up = [];
+    for (const p of points) { while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
+    for (let i = points.length - 1; i >= 0; i--) { const p = points[i]; while (up.length >= 2 && cross(up[up.length - 2], up[up.length - 1], p) <= 0) up.pop(); up.push(p); }
+    up.pop(); lo.pop();
+    return lo.concat(up);
+  }
+  const polyArea = (P) => { let a = 0; for (let i = 0; i < P.length; i++) { const p = P[i], q = P[(i + 1) % P.length]; a += p[0] * q[1] - q[0] * p[1]; } return Math.abs(a) / 2; };
+  const triArea = (a, b, c) => Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2;
+
+  function biggestQuad(H) {          // largest-area quad with corners on the hull
+    let P = H;
+    if (P.length > 36) { const step = P.length / 36; P = []; for (let i = 0; i < 36; i++) P.push(H[Math.floor(i * step)]); }
+    const n = P.length; let best = null, bestA = -1;
+    for (let i = 0; i < n; i++) for (let k = i + 2; k < n; k++) {
+      let aj = -1, j0 = -1, al = -1, l0 = -1;
+      for (let j = i + 1; j < k; j++) { const a = triArea(P[i], P[j], P[k]); if (a > aj) { aj = a; j0 = j; } }
+      for (let l = k + 1; l < n + i; l++) { const a = triArea(P[i], P[k], P[l % n]); if (a > al) { al = a; l0 = l % n; } }
+      if (j0 >= 0 && l0 >= 0 && aj + al > bestA) { bestA = aj + al; best = [P[i], P[j0], P[k], P[l0]]; }
+    }
+    return best;
+  }
+
+  function orderQuad(q) {           // clockwise on screen, first = nearest top-left
+    const cx = q.reduce((s, p) => s + p[0], 0) / 4, cy = q.reduce((s, p) => s + p[1], 0) / 4;
+    q = q.slice().sort((a, b) => Math.atan2(a[1] - cy, a[0] - cx) - Math.atan2(b[1] - cy, b[0] - cx));
+    let s0 = 0; for (let i = 1; i < 4; i++) if (q[i][0] + q[i][1] < q[s0][0] + q[s0][1]) s0 = i;
+    return q.slice(s0).concat(q.slice(0, s0));
+  }
+
+  function detectPlate() {
+    const s = DET_LONG / Math.max(pf.sw, pf.sh);
+    const w = Math.max(8, Math.round(pf.sw * s)), h = Math.max(8, Math.round(pf.sh * s));
+    detCanvas.width = w; detCanvas.height = h;
+    dctx.drawImage(pf.src, 0, 0, w, h);
+    const d = dctx.getImageData(0, 0, w, h).data;
+    // seed colour: mean of a small block at the seed point (screen centre, a tap, or the last plate centre)
+    const R = 4;
+    const cx = clamp(Math.round(pf.seed[0] * w), R, w - R - 1), cy = clamp(Math.round(pf.seed[1] * h), R, h - R - 1);
+    let sr = 0, sg = 0, sb = 0, sn = 0;
+    for (let y = cy - R; y <= cy + R; y++) for (let x = cx - R; x <= cx + R; x++) { const i = (y * w + x) * 4; sr += d[i]; sg += d[i + 1]; sb += d[i + 2]; sn++; }
+    sr /= sn; sg /= sn; sb /= sn;
+    const T1 = 62 * 62, T2 = 26 * 26;
+    const mask = new Uint8Array(w * h), queue = new Int32Array(w * h);
+    let qh = 0, qt = 0, area = 0;
+    const seed = cy * w + cx; mask[seed] = 1; queue[qt++] = seed;
+    while (qh < qt) {
+      const p = queue[qh++]; area++;
+      const px = p % w, py = (p / w) | 0, pi = p * 4;
+      const nb = [px > 0 ? p - 1 : -1, px < w - 1 ? p + 1 : -1, py > 0 ? p - w : -1, py < h - 1 ? p + w : -1];
+      for (const q of nb) {
+        if (q < 0 || mask[q]) continue;
+        const qi = q * 4, r = d[qi], g = d[qi + 1], b = d[qi + 2];
+        const ds = (r - sr) ** 2 + (g - sg) ** 2 + (b - sb) ** 2;
+        const dn = (r - d[pi]) ** 2 + (g - d[pi + 1]) ** 2 + (b - d[pi + 2]) ** 2;
+        if (ds < T1 && dn < T2) { mask[q] = 1; queue[qt++] = q; }
+      }
+    }
+    const frac = area / (w * h);
+    if (frac < 0.03 || frac > 0.8) return null;
+    // a plate sits inside the view: reject regions spread along two or more image edges
+    let edges = 0;
+    const edgeCount = (fn, len) => { let c = 0; for (let i = 0; i < len; i++) if (fn(i)) c++; return c / len > 0.12; };
+    if (edgeCount((i) => mask[i], w)) edges++;
+    if (edgeCount((i) => mask[(h - 1) * w + i], w)) edges++;
+    if (edgeCount((i) => mask[i * w], h)) edges++;
+    if (edgeCount((i) => mask[i * w + w - 1], h)) edges++;
+    if (edges >= 2) return null;
+    const pts = [];
+    for (let y = 0; y < h; y++) {
+      let x0 = -1, x1 = -1;
+      for (let x = 0; x < w; x++) if (mask[y * w + x]) { if (x0 < 0) x0 = x; x1 = x; }
+      if (x0 >= 0) { pts.push([x0, y]); if (x1 !== x0) pts.push([x1, y]); }
+    }
+    const H = hull(pts);
+    if (H.length < 4) return null;
+    const q = biggestQuad(H);
+    if (!q) return null;
+    const fill = polyArea(q) / polyArea(H);
+    return { quad: orderQuad(q).map((p) => [p[0] / s, p[1] / s]), kind: fill > 0.84 ? 'rect' : 'round' };
+  }
+
+  function solve8(A, b) {           // Gaussian elimination, A 8x8
+    for (let c = 0; c < 8; c++) {
+      let piv = c; for (let r = c + 1; r < 8; r++) if (Math.abs(A[r][c]) > Math.abs(A[piv][c])) piv = r;
+      [A[c], A[piv]] = [A[piv], A[c]]; [b[c], b[piv]] = [b[piv], b[c]];
+      for (let r = 0; r < 8; r++) if (r !== c) { const f = A[r][c] / A[c][c]; for (let k = c; k < 8; k++) A[r][k] -= f * A[c][k]; b[r] -= f * b[c]; }
+    }
+    return b.map((v, i) => v / A[i][i]);
+  }
+  function homography(src, dst) {    // returns 3x3 (row-major) mapping src -> dst
+    const A = [], b = [];
+    for (let i = 0; i < 4; i++) {
+      const [x, y] = src[i], [u, v] = dst[i];
+      A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); b.push(u);
+      A.push([0, 0, 0, x, y, 1, -v * x, -v * y]); b.push(v);
+    }
+    const h = solve8(A, b);
+    return [[h[0], h[1], h[2]], [h[3], h[4], h[5]], [h[6], h[7], 1]];
+  }
+
+  function solvePose(det) {
+    const f = PLATE.focal * Math.max(pf.sw, pf.sh), cx = pf.sw / 2, cy = pf.sh / 2;
+    const kinvCol = (H, j) => new THREE.Vector3((H[0][j] - cx * H[2][j]) / f, (H[1][j] - cy * H[2][j]) / f, H[2][j]);
+    let a, b;
+    if (det.kind === 'round') { a = b = PLATE.round / Math.SQRT2; }   // inscribed square of the rim
+    else {
+      const H0 = homography([[0, 0], [1, 0], [1, 1], [0, 1]], det.quad);
+      const asp = kinvCol(H0, 0).length() / kinvCol(H0, 1).length();
+      const ratio = clamp(Math.max(asp, 1 / asp), 1, 1.7);
+      if (asp >= 1) { a = PLATE.rect; b = PLATE.rect / ratio; } else { a = PLATE.rect / ratio; b = PLATE.rect; }
+    }
+    for (const sign of [1, -1]) {
+      const obj = [[0, 0], [a, 0], [a, sign * b], [0, sign * b]];
+      const H = homography(obj, det.quad);
+      const m0 = kinvCol(H, 0), m1 = kinvCol(H, 1), m2 = kinvCol(H, 2);
+      let lam = 2 / (m0.length() + m1.length());
+      if (m2.z * lam < 0) lam = -lam;
+      const r1 = m0.clone().multiplyScalar(lam).normalize();
+      const r2 = m1.clone().multiplyScalar(lam);
+      r2.sub(r1.clone().multiplyScalar(r1.dot(r2))).normalize();
+      const r3 = new THREE.Vector3().crossVectors(r1, r2);
+      const t = m2.clone().multiplyScalar(lam);
+      // R columns r1 r2 r3 (world -> OpenCV camera). Camera centre C = -R^T t
+      const Rt = new THREE.Matrix3().set(r1.x, r1.y, r1.z, r2.x, r2.y, r2.z, r3.x, r3.y, r3.z); // = R^T
+      const C = t.clone().applyMatrix3(Rt).negate();
+      if (C.z <= 0 && sign === 1) continue;
+      // three.js camera axes in world: x = R row 0, y = -R row 1, z = -R row 2
+      const xA = new THREE.Vector3(r1.x, r2.x, r3.x);
+      const yA = new THREE.Vector3(r1.y, r2.y, r3.y).negate();
+      const zA = new THREE.Vector3(r1.z, r2.z, r3.z).negate();
+      const m = new THREE.Matrix4().makeBasis(xA, yA, zA);
+      return { pos: C, quat: new THREE.Quaternion().setFromRotationMatrix(m), centre: new THREE.Vector3(a / 2, sign * b / 2, 0), f };
+    }
+    return null;
+  }
+
+  function screenFov(f) {            // video is shown with object-fit: cover
+    const sw = window.innerWidth, sh = window.innerHeight;
+    const k = Math.max(sw / pf.sw, sh / pf.sh);
+    return 2 * Math.atan((sh / 2) / (f * k)) * 180 / Math.PI;
+  }
+
+  // ?debug=1 draws the detected outline and the plate centre (diagonals' crossing)
+  const DEBUG = new URLSearchParams(location.search).get('debug') === '1';
+  let dbg = null;
+  function drawDebug(quad) {
+    if (!DEBUG) return;
+    if (!dbg) {
+      dbg = document.createElement('canvas');
+      dbg.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;pointer-events:none';
+      document.body.insertBefore(dbg, $('ui'));
+    }
+    const sw = window.innerWidth, sh = window.innerHeight;
+    dbg.width = sw; dbg.height = sh;
+    const g = dbg.getContext('2d');
+    g.clearRect(0, 0, sw, sh);
+    if (!quad) return;
+    const k = Math.max(sw / pf.sw, sh / pf.sh), ox = (sw - pf.sw * k) / 2, oy = (sh - pf.sh * k) / 2;
+    const P = quad.map((p) => [p[0] * k + ox, p[1] * k + oy]);
+    g.strokeStyle = '#5f5'; g.lineWidth = 3; g.beginPath();
+    P.forEach((p, i) => (i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]))); g.closePath(); g.stroke();
+    const [a, b, c, d2] = P;   // diagonals a-c and b-d
+    const den = (a[0] - c[0]) * (b[1] - d2[1]) - (a[1] - c[1]) * (b[0] - d2[0]);
+    const t = ((a[0] - b[0]) * (b[1] - d2[1]) - (a[1] - b[1]) * (b[0] - d2[0])) / den;
+    const x = a[0] + t * (c[0] - a[0]), y = a[1] + t * (c[1] - a[1]);
+    g.strokeStyle = '#f33'; g.beginPath(); g.moveTo(x - 12, y); g.lineTo(x + 12, y); g.moveTo(x, y - 12); g.lineTo(x, y + 12); g.stroke();
+    // where the dish's base centre actually projects
+    const w3 = new THREE.Vector3(pf.centre.x, pf.centre.y, 0).project(camera);
+    g.strokeStyle = '#3cf'; g.beginPath(); g.arc((w3.x * 0.5 + 0.5) * sw, (-w3.y * 0.5 + 0.5) * sh, 8, 0, 2 * Math.PI); g.stroke();
+  }
+
+  function setChip(text, ok) { plateChip.textContent = text; plateChip.classList.toggle('ok', !!ok); plateChip.hidden = false; }
+
+  function plateTick() {
+    if (!camOn || !pf.src || !pf.sw) return;
+    let det = null;
+    try { det = detectPlate(); } catch (e) { det = null; }
+    const pose = det && solvePose(det);
+    const now = performance.now();
+    if (pose && pose.pos.length() < 3) {
+      if (!pf.locked) {
+        camera.position.copy(pose.pos); camera.quaternion.copy(pose.quat);
+        shadowScale(arScale);
+        if (autoSpin) { autoSpin = false; syncSpin(); }
+      }
+      pf.camPos.copy(pose.pos); pf.camQuat.copy(pose.quat);
+      pf.centre.copy(pose.centre); pf.fov = screenFov(pose.f); pf.kind = det.kind; pf.quad = det.quad;
+      pf.locked = true; pf.lastSeen = now;
+      // follow the plate: next search starts from its centre
+      pf.seed = [det.quad.reduce((s, p) => s + p[0], 0) / 4 / pf.sw, det.quad.reduce((s, p) => s + p[1], 0) / 4 / pf.sh];
+      aim.hidden = true;
+      drawDebug(det.quad);
+      setChip(det.kind === 'round' ? '✓ Plate found · الصحن' : '✓ Plate found (tray) · الصحن', true);
+    } else if (pf.locked && now - pf.lastSeen > 1500) {
+      releasePlate();
+    } else if (!pf.locked) {
+      setChip('Aim the circle at the plate, or tap it · وجّه الدائرة نحو الصحن أو اضغط عليه', false);
+    }
+  }
+
+  function placeAim() {              // show the search circle where the seed is on screen
+    const sw = window.innerWidth, sh = window.innerHeight;
+    const k = Math.max(sw / pf.sw, sh / pf.sh), ox = (sw - pf.sw * k) / 2, oy = (sh - pf.sh * k) / 2;
+    aim.style.left = (pf.seed[0] * pf.sw * k + ox) + 'px';
+    aim.style.top = (pf.seed[1] * pf.sh * k + oy) + 'px';
+    aim.hidden = false;
+  }
+
+  // a tap (not a drag) in camera mode picks the plate under the finger
+  function tapToPick(sx, sy) {
+    if (!camOn || !pf.src || !pf.sw) return;
+    const sw = window.innerWidth, sh = window.innerHeight;
+    const k = Math.max(sw / pf.sw, sh / pf.sh), ox = (sw - pf.sw * k) / 2, oy = (sh - pf.sh * k) / 2;
+    pf.seed = [clamp((sx - ox) / k / pf.sw, 0.02, 0.98), clamp((sy - oy) / k / pf.sh, 0.02, 0.98)];
+    if (pf.locked) releasePlate();
+    placeAim();
+    plateTick();
+  }
+
+  // the sun's shadow box is in world units; shrink it with the dish so real-size shadows stay sharp
+  function shadowScale(k) {
+    sc.left = -5 * k; sc.right = 5 * k; sc.top = 6 * k; sc.bottom = -6 * k; sc.near = 0.01; sc.far = 20 * k + 1;
+    sc.updateProjectionMatrix();
+  }
+  function releasePlate() {
+    shadowScale(1);
+    pf.locked = false;
+    pf.seed = [0.5, 0.5];
+    if (pf.src) placeAim();
+    drawDebug(null);
+    rig.position.set(0, 0, 0); rig.quaternion.identity(); rig.scale.setScalar(1);
+    camera.fov = 45; camera.updateProjectionMatrix();
+  }
+
+  function startPlateFinder(src, sw, sh) {
+    pf.src = src; pf.sw = sw; pf.sh = sh; pf.seed = [0.5, 0.5];
+    placeAim();
+    setChip('Aim the circle at the plate, or tap it · وجّه الدائرة نحو الصحن أو اضغط عليه', false);
+    clearInterval(pf.timer);
+    pf.timer = setInterval(plateTick, 120);
+  }
+  function stopPlateFinder() {
+    clearInterval(pf.timer); pf.timer = null; pf.src = null;
+    aim.hidden = true; plateChip.hidden = true;
+    if (pf.locked) releasePlate();
+  }
+
   async function toggleCam() {
     if (camOn) {
       const s = video.srcObject;
       if (s) s.getTracks().forEach((t) => t.stop());
       video.srcObject = null;
       video.style.display = 'none';
+      camImg.style.display = 'none';
       camOn = false;
+      stopPlateFinder();
       btnCam.classList.remove('on');
       updateWorld();
       return;
     }
+    // ?camtest=photo.jpg (same site) uses a still photo instead of the camera, for testing
+    const test = new URLSearchParams(location.search).get('camtest');
+    if (test && /^[\w\-./]+$/.test(test) && !test.includes('..')) {
+      camImg.onload = () => {
+        camImg.style.display = 'block';
+        camOn = true; btnCam.classList.add('on'); updateWorld();
+        startPlateFinder(camImg, camImg.naturalWidth, camImg.naturalHeight);
+      };
+      camImg.src = test;
+      return;
+    }
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('no camera API');
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
       video.srcObject = stream;
       await video.play();
       video.style.display = 'block';
       camOn = true;
       btnCam.classList.add('on');
       updateWorld();
-      say('Point at your table. The virtual table and plate are hidden, the real ones show.', 4500);
+      startPlateFinder(video, video.videoWidth, video.videoHeight);
+      say('Aim the circle at the plate. The dish sits in its centre.', 4500);
     } catch (e) {
       say('Camera is blocked here. Host this file on HTTPS (GitHub Pages / Netlify) and open it on your phone.', 7000);
     }
@@ -648,7 +941,7 @@ button[hidden]{display:none}
   };
   canvas.addEventListener('pointerdown', (e) => {
     try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
-    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t0: performance.now() });
     if (autoSpin) { autoSpin = false; syncSpin(); }
   });
   canvas.addEventListener('pointermove', (e) => {
@@ -666,7 +959,14 @@ button[hidden]{display:none}
     }
   });
   const endPtr = (e) => { ptrs.delete(e.pointerId); };
-  canvas.addEventListener('pointerup', endPtr);
+  canvas.addEventListener('pointerup', (e) => {
+    const p = ptrs.get(e.pointerId);
+    const single = ptrs.size === 1;
+    endPtr(e);
+    if (p && single && Math.hypot(e.clientX - p.x0, e.clientY - p.y0) < 10 && performance.now() - p.t0 < 350) {
+      tapToPick(e.clientX, e.clientY);
+    }
+  });
   canvas.addEventListener('pointercancel', endPtr);
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
@@ -738,7 +1038,16 @@ button[hidden]{display:none}
     if (autoSpin) yaw += arActive ? 0.004 : 0.006;
     spin.rotation.y = yaw;
 
-    if (!arActive) {
+    if (!arActive && camOn && pf.locked) {
+      // plate mode: world = plate (metres, z up toward the camera); dish at its centre, real size
+      if (pf.src === video && pf.sw !== video.videoWidth) { pf.sw = video.videoWidth; pf.sh = video.videoHeight; }
+      camera.position.lerp(pf.camPos, 0.35);
+      camera.quaternion.slerp(pf.camQuat, 0.35);
+      if (Math.abs(camera.fov - pf.fov) > 0.01) { camera.fov = pf.fov; camera.updateProjectionMatrix(); }
+      rig.position.set(pf.centre.x, pf.centre.y, 0.003);
+      rig.quaternion.setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
+      rig.scale.setScalar(arScale);
+    } else if (!arActive) {
       const aspect = window.innerWidth / window.innerHeight;
       const needH = Math.max(2.7, dishHeight * 2.1) + EXPLODE_SPAN * explode;
       const needW = 5.0;
@@ -768,7 +1077,8 @@ button[hidden]{display:none}
       v.copy(L.obj.position);
       v.y += L.labelOff;
       L.obj.parent.localToWorld(v);
-      v.set(0, v.y, 0).project(camera);
+      if (!(camOn && pf.locked)) v.set(0, v.y, 0);
+      v.project(camera);
       const y = (-v.y * 0.5 + 0.5) * window.innerHeight;
       L.el.style.transform = 'translateY(' + (y - 16).toFixed(1) + 'px)';
       L.el.style.opacity = Math.min(1, (explode - 0.35) / 0.35);
