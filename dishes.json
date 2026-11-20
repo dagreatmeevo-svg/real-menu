@@ -1,6 +1,62 @@
 {
   "dishes": [
     {
+      "id": "jutsu-burger",
+      "name": {
+        "en": "Double cheeseburger",
+        "ar": "دبل تشيز برغر"
+      },
+      "model": "models/jutsu-burger.glb",
+      "ios_model": "models/jutsu-burger.usdz",
+      "layers": [
+        {
+          "node": "BUN_bottom",
+          "en": "Bottom bun",
+          "ar": "الخبز السفلي"
+        },
+        {
+          "node": "LETTUCE_leaf",
+          "en": "Lettuce",
+          "ar": "الخس"
+        },
+        {
+          "node": "LETTUCE_leaf_inner",
+          "en": "Inner leaf",
+          "ar": "الورقة الداخلية"
+        },
+        {
+          "node": "PATTY_lower",
+          "en": "Beef patty",
+          "ar": "اللحم"
+        },
+        {
+          "node": "CHEESE_lower",
+          "en": "Cheddar",
+          "ar": "الشيدر"
+        },
+        {
+          "node": "PATTY_upper",
+          "en": "Second patty",
+          "ar": "قطعة اللحم الثانية"
+        },
+        {
+          "node": "CHEESE_upper",
+          "en": "Cheddar",
+          "ar": "الشيدر"
+        },
+        {
+          "node": "SAUCE_mayo",
+          "en": "Mayo",
+          "ar": "المايونيز"
+        },
+        {
+          "node": "BUN_top",
+          "en": "Brioche",
+          "ar": "خبز البريوش"
+        }
+      ]
+    },
+    {
       "id": "burger",
       "name": { "en": "Classic Burger", "ar": "برغر كلاسيك" },
       "model": "models/burger.glb",

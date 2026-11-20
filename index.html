@@ -29,9 +29,10 @@ body.ar #cam,body.ar #camImg{display:none!important}
 .row label{font-size:13px;white-space:nowrap}
 input[type=range]{flex:1;accent-color:#ffb347;height:28px}
 .btns{margin-top:8px;gap:8px}
-button{flex:1;padding:10px 6px;border-radius:10px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.08);color:#fff;font-size:13px;font-family:inherit}
+button,#quickLook{flex:1;padding:10px 6px;border-radius:10px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.08);color:#fff;font-size:13px;font-family:inherit}
 button.on{background:#ffb347;color:#2a1a08;border-color:#ffb347;font-weight:600}
-button[hidden]{display:none}
+#quickLook{text-align:center;text-decoration:none}
+button[hidden],#quickLook[hidden]{display:none}
 .note{margin-top:8px;font-size:11px;opacity:.6;text-align:center}
 .note.credit{margin-top:4px;font-size:10px;opacity:.5}
 .note.credit a{color:inherit}
@@ -63,9 +64,10 @@ button[hidden]{display:none}
     <div class="row btns">
       <button id="btnCam">Camera</button>
       <button id="btnSpin" class="on">Auto-rotate</button>
+      <a id="quickLook" rel="ar" hidden><img width="1" height="1" alt="">Place on table (AR)</a>
       <button id="btnAR" hidden>Place on table (AR)</button>
     </div>
-    <div class="note">Camera: aim at the plate or tap it, the dish sits in its centre. AR table placement: Android Chrome.</div>
+    <div class="note">On a supported phone, tap Place on table (AR) and point at a flat surface. Camera mode also works with a plate.</div>
     <div class="note credit" id="credit" hidden></div>
   </div>
 </div>
@@ -517,6 +519,11 @@ button[hidden]{display:none}
     const realW = dish.size_m || (width > 0.03 && width < 0.6 ? width : 0.12);
     arScale = realW / DISH_WIDTH;
     setTitle(dish.name);
+    const quickLook = $('quickLook');
+    if (dish.ios_model && quickLook.relList.supports('ar')) {
+      quickLook.href = dish.ios_model;
+      quickLook.hidden = false;
+    }
     if (dish.credit) {
       const c = $('credit');
       c.textContent = '';
@@ -550,7 +557,7 @@ button[hidden]{display:none}
   }
 
   async function loadDish() {
-    const id = (new URLSearchParams(location.search).get('dish') || 'burger').trim().toLowerCase();
+    const id = (new URLSearchParams(location.search).get('dish') || 'jutsu-burger').trim().toLowerCase();
     let dish = null;
     try {
       const res = await fetch('dishes.json', { cache: 'no-cache' });
